@@ -132,7 +132,8 @@ class TestPullFilesTraversalRegression(unittest.TestCase):
         with self.assertRaises(ValueError):
             files.pull_files("gs://bucket/models/llama/", self.dst)
 
-        mock_gcs.get_bucket.return_value.blob.return_value.download_to_filename.assert_not_called()
+        mock_gcs.bucket.return_value.blob.return_value.download_to_filename.assert_not_called()
+        mock_gcs.get_bucket.assert_not_called()
         self.assertEqual(os.listdir(self.dst), [])
 
     @patch("runai_model_streamer_gcs.files.files._create_client")
@@ -147,12 +148,14 @@ class TestPullFilesTraversalRegression(unittest.TestCase):
         def fake_download_to_filename(destination_file):
             with open(destination_file, "wb") as f:
                 f.write(b"content")
-        mock_gcs.get_bucket.return_value.blob.return_value.download_to_filename.side_effect = (
+        mock_gcs.bucket.return_value.blob.return_value.download_to_filename.side_effect = (
             fake_download_to_filename)
 
         files.pull_files("gs://bucket/models/llama/", self.dst)
 
         self.assertTrue(os.path.exists(os.path.join(self.dst, "subdir", "config.json")))
+        mock_gcs.bucket.assert_called_once_with("bucket")
+        mock_gcs.get_bucket.assert_not_called()
 
     @patch("runai_model_streamer_gcs.files.files._create_client")
     @patch("runai_model_streamer_gcs.files.files.list_files")
@@ -166,12 +169,59 @@ class TestPullFilesTraversalRegression(unittest.TestCase):
         def fake_download_to_filename(destination_file):
             with open(destination_file, "wb") as f:
                 f.write(b"content")
-        mock_gcs.get_bucket.return_value.blob.return_value.download_to_filename.side_effect = (
+        mock_gcs.bucket.return_value.blob.return_value.download_to_filename.side_effect = (
             fake_download_to_filename)
 
         files.pull_files("gs://bucket/models/llama/", self.dst)
 
         self.assertTrue(os.path.exists(os.path.join(self.dst, "a", "b", "c", "deep.safetensors")))
+        mock_gcs.bucket.assert_called_once_with("bucket")
+        mock_gcs.get_bucket.assert_not_called()
+
+    @patch("runai_model_streamer_gcs.files.files._create_client")
+    @patch("runai_model_streamer_gcs.files.files.list_files")
+    def test_pull_files_reuses_bucket_handle_across_multiple_files(
+            self, mock_list_files, mock_create_client):
+        mock_gcs = MagicMock()
+        mock_create_client.return_value = mock_gcs
+        mock_list_files.return_value = (
+            "bucket",
+            "models/llama/",
+            [
+                "models/llama/model-00001.safetensors",
+                "models/llama/model-00002.safetensors",
+            ],
+        )
+
+        files.pull_files("gs://bucket/models/llama/", self.dst)
+
+        mock_gcs.bucket.assert_called_once_with("bucket")
+        mock_gcs.get_bucket.assert_not_called()
+        self.assertEqual(mock_gcs.bucket.return_value.blob.call_count, 2)
+
+    def test_list_files_uses_bucket_without_get_bucket_rpc(self):
+        mock_gcs = MagicMock()
+        blob_a = MagicMock()
+        blob_a.name = "models/llama/model.safetensors"
+        blob_dir = MagicMock()
+        blob_dir.name = "models/llama/subdir/"
+        mock_gcs.bucket.return_value.list_blobs.return_value = [blob_a, blob_dir]
+
+        bucket_name, prefix, paths = files.list_files(
+            mock_gcs,
+            "gs://bucket/models/llama",
+            allow_pattern=["*.safetensors"],
+            recursive=False,
+        )
+
+        self.assertEqual(bucket_name, "bucket")
+        self.assertEqual(prefix, "models/llama/")
+        self.assertEqual(paths, ["models/llama/model.safetensors"])
+        mock_gcs.bucket.assert_called_once_with("bucket")
+        mock_gcs.get_bucket.assert_not_called()
+        mock_gcs.bucket.return_value.list_blobs.assert_called_once_with(
+            prefix="models/llama/", delimiter="/"
+        )
 
 
 if __name__ == "__main__":
